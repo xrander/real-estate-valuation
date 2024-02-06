@@ -1,0 +1,281 @@
+---
+title: "Real Estate Prediction"
+author: "Olamide Adu"
+format: html
+theme: solar
+---
+
+![](https://devtraco.com/wp-content/uploads/2022/10/Commercial-real-estate.jpg)
+
+```{r}
+#| label: load-libraries
+#| include: false
+#| message: false
+
+library(readxl)
+library(tidyverse)
+library(janitor)
+library(ggthemes)
+library(scales)
+```
+
+# Introduction
+
+The market historical data set of real estate valuation are collected from Xindian Dist., New Taipei City, Taiwan. This project aims to predict price of houses in Xindian, New Taipei given some characteristics of buildings.
+
+![Xindian, New Taipei City,Taiwan](https://newtaipei.travel/content/images/travelpurpose/39468/travelpurpose-image-yvttusgjueag-s79qftr3g.jpg)
+
+# The Data
+
+This data is available in the public and is collected from [UC Irvine Machine Learning Repository](https://archive.ics.uci.edu/dataset/477/real+estate+valuation+data+set), for more data to practice machine learning visit [UCirvine](https://archive.ics.uci.edu/).
+
+```{r}
+#| label: import-data
+#| message: false
+
+real_estate <- read_excel("Real estate valuation data set.xlsx") |> 
+  clean_names()
+
+head(real_estate)
+```
+
+## Data Definition
+
+| Variable Name              | Role                                | Type       | Description                                                                          | Units                                                      | Missing Values |
+|:-----------|------------|------------|------------|------------|------------:|
+| No                         | ID                                  | Integer    |                                                                                      |                                                            |             no |
+| X1                         | transaction date                    | Feature    | Continuous                                                                           | for example, 2013.250=2013 March, 2013.500=2013 June, etc. |             no |
+| X2                         | house age                           | Feature    | Continuous                                                                           |                                                            |           year |
+| X3                         | distance to the nearest MRT station | Feature    | Continuous                                                                           |                                                            |          meter |
+| X4                         | number of convenience stores        | Feature    | Integer                                                                              | number of convenience stores in the living circle on foot  |        integer |
+| X5                         | latitude                            | Feature    | Continuous                                                                           | geographic coordinate, latitude                            |         degree |
+| X6                         | longitude                           | Feature    | Continuous                                                                           | geographic coordinate, longitude                           |         degree |
+| Y house price of unit area | Target                              | Continuous | 10000 New Taiwan Dollar/Ping, where Ping is a local unit, 1 Ping = 3.3 meter squared | 10000 New Taiwan Dollar/Ping                               |             no |
+
+
+# Data Preparation
+
+First, we will split the date from the Taiwan system to year and month.
+```{r}
+#| label: split-trans-date-to-month-and-year
+
+real_estate <- real_estate |> 
+  mutate(
+    year = x1_transaction_date %/% 1,
+    month = round((x1_transaction_date %% 1) * 12), # to get month from taiwanese date
+    .before = x2_house_age
+  )
+
+
+real_estate <- real_estate |> 
+  mutate(month = case_when(month == 0 ~ 1, TRUE ~ month)) |> 
+  select(!c(1, 2))
+```
+
+The names of the variables are a bit long and unclear so we will rename them to make coding easy
+```{r}
+#| label: rename columns
+real_estate <- real_estate |> 
+  rename(
+    age = x2_house_age,
+    distance_to_station = x3_distance_to_the_nearest_mrt_station,
+    number_convenience_stores = x4_number_of_convenience_stores,
+    latitude = x5_latitude,
+    longitude = x6_longitude,
+    price = y_house_price_of_unit_area
+  )
+
+real_estate <- real_estate |> 
+  mutate(
+    age = ceiling(age),
+    sale_date = make_date(year = as.integer(year), month = month),
+    .before = age
+  ) |> 
+  select(-c(year, month))
+
+names(real_estate)
+```
+
+To get a better grasp of the pricing, the US Dollar will be used, and the size of the houses in square meter will be calculated to give an idea of how big the properties are
+```{r}
+#| label: house-size-and-price-in-usd
+real_estate <- real_estate |> 
+  mutate(
+    size_m2 = (price * 10000) / 3.9,
+    price_usd = (price * 10000) * 0.032,
+    .before = price
+  )
+```
+
+## Missing values??
+Even if the data is having no missing value when imported, it's not a bad idea to look for missing data after the preparation which we have made.
+```{r}
+#| lable: missing-value
+sum(is.na(real_estate))
+```
+
+We can also check for duplicate data point
+```{r}
+sum(duplicated(real_estate))
+```
+
+There are no duplicate data point. We can proceed with our analysis after this.
+
+# Exploratory Data Analysis
+
+## Target Variable
+### Univariate
+```{r}
+#| label: fig-price-distribution
+#| fig-cap: House price distribution
+price_median <- 
+  tibble(
+    med = median(real_estate$price_usd),
+    label = paste0("$", med)
+  )
+
+ggplot(real_estate, aes(price_usd)) +
+  geom_histogram(binwidth = 500, alpha =0.7, fill = "wheat3") +
+  geom_density(stat = "bin", binwidth = 500, col = "brown") +
+  geom_vline(aes(xintercept = median(price_usd)), col = "violetred3") +
+  geom_text(
+    data = price_median,
+    aes(x = med, y = 30, label = label),
+    hjust = -0.3,
+    col = "red"
+  ) +
+  labs(
+    x = "Price",
+    y = "count",
+    title = "Long-tailed Price distribution"
+  ) +
+  theme_igray() +
+  scale_x_continuous(label = label_dollar())
+```
+The most house price ranges between 11000 to 14000 dollars @fig-price-distribution. The distribution shows there seems to be an outlier in our data. fig-outlier shows the outlier
+
+```{r}
+#| label: fig-outlier
+#| fig-cap: Outlier point significantly overprized
+
+
+outlier <- 
+  tibble(
+    x = 1,
+    max_price = max(real_estate$price_usd),
+  )
+
+    
+ggplot(real_estate, aes(price_usd, x = 1)) +
+  ggbeeswarm::geom_quasirandom(
+    col = "darkgreen",
+    shape = "circle"
+  ) + 
+  geom_point(
+    data = outlier, 
+    aes(x, max_price),
+    shape = "circle filled", stroke = 1.2, size = 3,
+    fill = "red",  col = "orange",
+  ) +
+  geom_text(
+    data = outlier,
+    aes(y = max_price, label = "Outlier"),
+    vjust = 1.7
+  ) +
+  scale_y_continuous(
+    label = label_dollar(),
+    breaks = seq(0, 40000, 5000)
+  ) +
+  labs(
+    x = "",
+    y = "Price",
+    title = "Red dot shows house out that is overprized"
+  ) +
+  coord_flip() +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.y = element_blank()
+  ) +
+  theme_pander()
+```
+
+We need to remove the overprized house
+```{r}
+#| label: remove-overprized-house
+
+real_estate <- real_estate |> filter(!price_usd > 30000)
+
+range(real_estate$price_usd)
+```
+
+We will continue our EDA now that the outlier has been removed
+
+### Multivariate
+```{r}
+#| label: price-distribution-month
+#| fig-cap: Monthly price distribution of houses
+
+
+ggplot(real_estate, aes(factor(sale_date), price_usd)) +
+  geom_violin(fill = "olivedrab3") +
+  geom_jitter(aes(y = price_usd), size = 0.5, alpha = 0.5, col = "red") +
+  theme(axis.text.x = element_text(angle = 20)) +
+  labs(x = "Sale Date", y = "Price", 
+       title = "January and November shows large volume of sales",
+       subtitle = "Mid year (May/June) shows increase in house purchase, as sales in other months declines"
+  ) +
+  scale_y_continuous(label = label_dollar()) +
+  theme_pander()
+```
+```{r}
+#| label: age-price-relationship
+
+ggplot(real_estate, aes(fct_reorder(cut_number(age, 10), price_usd, .fun = sum), price_usd)) +
+  geom_col(fill = "springgreen3") +
+  labs(
+    x = "Age",
+    y = "Price",
+    title = str_wrap("New houses age 0 to 4 fetch made more sales in dollar
+                     in general than old houses", width = 60)
+  ) +
+  scale_y_continuous(label = label_dollar()) +
+  coord_flip() +
+  theme_igray()
+```
+
+```{r}
+#| label: fig-correlation-age-price
+#| fig-cap: Correlation between  age and price
+correlation <- cor(real_estate$price_usd, real_estate$age)
+
+ggplot(real_estate, aes(price_usd, age)) +
+  geom_smooth(method = "lm", se = F, col = "tomato2") +
+  expand_limits(y = c(0, 45)) +
+  labs(
+    x = "Price",
+    y = "Age",
+    title = "House price reduces as age increases"
+  )+
+  annotate(
+    geom = "label",
+    label = paste("correlation:", round(correlation, 2), sep = " "),
+    x = 15000, y = 25, col = "red"
+  ) +
+  theme_clean()
+```
+
+@fig-correlation-age-price shows the relationship between house price and the age of houses
+
+```{r}
+ggplot(real_estate, aes(price_usd, distance_to_station)) +
+  geom_point() +
+  scale_y_log10(label = label_number()) +
+  labs(
+    x = "Price",
+    y = "Distance to Station (m)",
+    title = "Negative relationship between Price and Distance to Station",
+    subtitle = "Houses closer to the station are costlier"
+  ) +
+  theme_pander()
+```
