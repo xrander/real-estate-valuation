@@ -14,7 +14,9 @@ theme: solar
 
 library(readxl)
 library(tidyverse)
+library(tidymodels)
 library(janitor)
+library(GGally)
 library(ggthemes)
 library(scales)
 ```
@@ -42,7 +44,7 @@ head(real_estate)
 ## Data Definition
 
 | Variable Name              | Role                                | Type       | Description                                                                          | Units                                                      | Missing Values |
-|:-----------|------------|------------|------------|------------|------------:|
+|:-----------|------------|------------|------------|------------|-----------:|
 | No                         | ID                                  | Integer    |                                                                                      |                                                            |             no |
 | X1                         | transaction date                    | Feature    | Continuous                                                                           | for example, 2013.250=2013 March, 2013.500=2013 June, etc. |             no |
 | X2                         | house age                           | Feature    | Continuous                                                                           |                                                            |           year |
@@ -52,10 +54,10 @@ head(real_estate)
 | X6                         | longitude                           | Feature    | Continuous                                                                           | geographic coordinate, longitude                           |         degree |
 | Y house price of unit area | Target                              | Continuous | 10000 New Taiwan Dollar/Ping, where Ping is a local unit, 1 Ping = 3.3 meter squared | 10000 New Taiwan Dollar/Ping                               |             no |
 
-
 # Data Preparation
 
 First, we will split the date from the Taiwan system to year and month.
+
 ```{r}
 #| label: split-trans-date-to-month-and-year
 
@@ -73,6 +75,7 @@ real_estate <- real_estate |>
 ```
 
 The names of the variables are a bit long and unclear so we will rename them to make coding easy
+
 ```{r}
 #| label: rename columns
 real_estate <- real_estate |> 
@@ -97,6 +100,7 @@ names(real_estate)
 ```
 
 To get a better grasp of the pricing, the US Dollar will be used, and the size of the houses in square meter will be calculated to give an idea of how big the properties are
+
 ```{r}
 #| label: house-size-and-price-in-usd
 real_estate <- real_estate |> 
@@ -108,13 +112,16 @@ real_estate <- real_estate |>
 ```
 
 ## Missing values??
+
 Even if the data is having no missing value when imported, it's not a bad idea to look for missing data after the preparation which we have made.
+
 ```{r}
 #| lable: missing-value
 sum(is.na(real_estate))
 ```
 
 We can also check for duplicate data point
+
 ```{r}
 sum(duplicated(real_estate))
 ```
@@ -124,7 +131,9 @@ There are no duplicate data point. We can proceed with our analysis after this.
 # Exploratory Data Analysis
 
 ## Target Variable
+
 ### Univariate
+
 ```{r}
 #| label: fig-price-distribution
 #| fig-cap: House price distribution
@@ -152,11 +161,12 @@ ggplot(real_estate, aes(price_usd)) +
   theme_igray() +
   scale_x_continuous(label = label_dollar())
 ```
+
 The most house price ranges between 11000 to 14000 dollars @fig-price-distribution. The distribution shows there seems to be an outlier in our data. fig-outlier shows the outlier
 
 ```{r}
 #| label: fig-outlier
-#| fig-cap: Outlier point significantly overprized
+#| fig-cap: Outlier point significantly overprized above 30000 usd
 
 
 outlier <- 
@@ -201,6 +211,7 @@ ggplot(real_estate, aes(price_usd, x = 1)) +
 ```
 
 We need to remove the overprized house
+
 ```{r}
 #| label: remove-overprized-house
 
@@ -212,9 +223,10 @@ range(real_estate$price_usd)
 We will continue our EDA now that the outlier has been removed
 
 ### Multivariate
+
 ```{r}
 #| label: price-distribution-month
-#| fig-cap: Monthly price distribution of houses
+#| fig-cap: Monthly price distribution of houses, there are some traces of seasonality
 
 
 ggplot(real_estate, aes(factor(sale_date), price_usd)) +
@@ -228,6 +240,9 @@ ggplot(real_estate, aes(factor(sale_date), price_usd)) +
   scale_y_continuous(label = label_dollar()) +
   theme_pander()
 ```
+
+m
+
 ```{r}
 #| label: age-price-relationship
 
@@ -236,7 +251,7 @@ ggplot(real_estate, aes(fct_reorder(cut_number(age, 10), price_usd, .fun = sum),
   labs(
     x = "Age",
     y = "Price",
-    title = str_wrap("New houses age 0 to 4 fetch made more sales in dollar
+    title = str_wrap("New houses age 0 to 4 years fetch made more sales in dollar
                      in general than old houses", width = 60)
   ) +
   scale_y_continuous(label = label_dollar()) +
@@ -279,3 +294,91 @@ ggplot(real_estate, aes(price_usd, distance_to_station)) +
   ) +
   theme_pander()
 ```
+
+```{r}
+#| label: location-of-houses
+#| fig-cap: Houses get expensive as we move in a northeast direction, 
+ggplot(real_estate, aes(longitude, latitude, col = price_usd)) +
+  geom_jitter() +
+  labs(
+    col = "Price (USD)",
+    x = "Longitude",
+    y = "Latitude",
+    title = "The prices of houses increases as we move North East",
+    subtitle = str_wrap("Prices of houses increases where there are clusters\ of house, this
+                        may be due to the proximity to the MRT station", width = 55)
+  ) +
+  scale_colour_gradient(low = "gray", high = "red") +
+  theme_pander() +
+  theme(legend.position = "top") +
+  guides(
+    color = guide_colorbar(barwidth = 15, barheight = 1/2, ticks.colour = "black", title.position = "left", title.theme = element_text(size = 8)))
+```
+
+#### Correlation with other variables
+
+```{r}
+#| label: correlation-plot
+#| fig-cap: All the factors shows strong relationship with the price of the building
+
+ggcorr(real_estate |> select(!c(sale_date, price)))
+```
+
+While size, number of convenience store close to the building and the position of the building, i.e., longitude and latitude are positively correlated to the price of a building, the older a building, and the farther it is from the MRT station the more likely it reduces in price.
+
+# Model Building
+
+Before we begin modeling, we need to remove some variables that might not be a big influence, this include:
+
+-   sales_date, as there is just a year span of data, it is better we extract just the month use that
+
+-   price, we have price in US Dollar, already, we do not need the price in Taiwanese dollars.
+
+```{r}
+#| label: final-clean-up
+real_estate <- real_estate |> 
+  mutate(
+    month = month(sale_date),
+    .before = age
+  ) |> 
+  select(-c(sale_date, price))
+
+head(real_estate)
+```
+
+
+Now we can begin the modelling process.
+
+## Model Selection
+For this analysis, we will use:
+
+-   linear regression, simple and still effective
+
+-   XGboost, 
+
+-   random forest, and
+
+-   support vector machine
+
+## Model Engine
+```{r}
+lm_model <- linear_reg() |> 
+  set_engine("lm")
+
+rf_model <- 
+  rand_forest(
+    trees = 1000,
+    min_n = tune(),
+    mtry = tune()
+  ) |> 
+  set_engine("ranger") |> 
+  set_mode("regression")
+
+xg_model <- boost_tree() |> 
+  set_mode("regression")
+
+svm_model <- svm_linear() |> 
+  set_engine("kernlab") |> 
+  set_mode("regression")
+```
+
