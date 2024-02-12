@@ -1,5 +1,5 @@
 ---
-title: "Real Estate Prediction"
+title: "Real Estate Prediction Using Boosting Tree (XGBoost)"
 author: "Olamide Adu"
 format: html
 theme: solar
@@ -44,7 +44,7 @@ head(real_estate)
 ## Data Definition
 
 | Variable Name              | Role                                | Type       | Description                                                                          | Units                                                      | Missing Values |
-|:-----------|------------|------------|------------|------------|-----------:|
+|:---------------------------|-------------------------------------|------------|--------------------------------------------------------------------------------------|------------------------------------------------------------|---------------:|
 | No                         | ID                                  | Integer    |                                                                                      |                                                            |             no |
 | X1                         | transaction date                    | Feature    | Continuous                                                                           | for example, 2013.250=2013 March, 2013.500=2013 June, etc. |             no |
 | X2                         | house age                           | Feature    | Continuous                                                                           |                                                            |           year |
@@ -346,39 +346,223 @@ real_estate <- real_estate |>
 head(real_estate)
 ```
 
-
-Now we can begin the modelling process.
-
-## Model Selection
 For this analysis, we will use:
 
--   linear regression, simple and still effective
+-   XGboost
 
--   XGboost, 
+### Data Sharing
 
--   random forest, and
-
--   support vector machine
-
-## Model Engine
 ```{r}
-lm_model <- linear_reg() |> 
-  set_engine("lm")
+#| label: data-sharing
 
-rf_model <- 
-  rand_forest(
-    trees = 1000,
-    min_n = tune(),
-    mtry = tune()
-  ) |> 
-  set_engine("ranger") |> 
-  set_mode("regression")
+set.seed(333)
 
-xg_model <- boost_tree() |> 
-  set_mode("regression")
 
-svm_model <- svm_linear() |> 
-  set_engine("kernlab") |> 
-  set_mode("regression")
+real_estate_split <- initial_split(real_estate, prop = .8, strata = price_usd)
+
+real_estate_train <- training(real_estate_split)
+real_estate_test <- testing(real_estate_split)
+
+real_estate_split
 ```
 
+## Model Specification
+
+Given our choice of model, XGBoost, a tree-based model, a lot of preprocessing is not required, we can going to dive right into our model specification, and tune a lot of the model hyperparameter to reduce the chances of over-fitting and under-fitting.
+
+```{r}
+#| label: boost-tree-model-specs
+
+xg_model <- 
+  boost_tree(
+    mtry = tune(), min_n = tune(),
+    tree_depth = tune(), trees = 1000,
+    loss_reduction = tune(),
+    sample_size = tune(),
+    learn_rate = tune(),
+  ) |> 
+  set_engine("xgboost") |> 
+  set_mode("regression")
+
+xg_model |>  translate()
+```
+
+## Tune Grid
+
+Next, we have to set up some values for our hyperparameter, we don't want to exhaust our computing resource, and face the risk of overfitting. We will use the **Latin Hypercube** grid as this approach can be more computationally efficient than a regular grid, especially when there are many hyperparameters to tune. Random selection can also introduce diversity into the search process.
+
+```{r}
+#| label: tbl-boost-tree-grid
+#| tbl-cap: XGBoost Tune Grid
+#| tbl-cap-location: top
+
+set.seed(3434)
+
+
+xgb_grid <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), real_estate_train),
+  learn_rate(),
+  size = 30
+)
+
+xgb_grid
+```
+
+Since mtry depends on the number of predictors, it had to be tuned differently @tbl-boost-tree-grid.
+
+## Workflow Process
+
+To improve efficiency and streamline processes, we start a modelling workflow.
+
+```{r}
+#| label: boost-tree-model-workflow
+
+xg_wf <- workflow() |> 
+  add_formula(price_usd ~ .) |> 
+  add_model(xg_model)
+
+xg_wf
+```
+
+## Cross Validation
+
+Next, we create resamples for tuning the model, @tbl-cross-validation-resamples.
+
+```{r}
+#| label: tbl-cross-validation-resamples
+#| tbl-cap: 10 Cross Fold Resamples 
+#| tbl-cap-location: top
+set.seed(222)
+
+real_estate_folds <- vfold_cv(real_estate_train, strata = price_usd)
+```
+
+**NOW WE TUNE**. We will use our resamples, the tuneable workflow, and the Latin grid of parameters which we have to try get the best value. To also speed up the process, we will enable parallel computing
+
+```{r}
+doParallel::registerDoParallel()
+
+set.seed(222)
+
+xg_tune_res <- tune_grid(
+  xg_wf,
+  resamples = real_estate_folds,
+  grid = xgb_grid,
+  control = control_grid(save_pred = T)
+)
+```
+
+# Exploring Tune Results
+
+```{r}
+xg_tune_res |> 
+  collect_metrics() |> 
+  filter(.metric == "rmse") |> 
+  select(mean, mtry:sample_size) |> 
+  pivot_longer(
+    mtry:sample_size,
+    values_to = "value",
+    names_to = "parameter"
+  ) |> 
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_jitter(show.legend = F, width = .4) +
+  facet_wrap(~parameter, scales = "free_y")
+```
+
+The lower the rmse, the better the model, a simplification, but this is not always the case. We will stick to that for now.
+
+Let's show the best performing set of parameter \## Best Tune
+
+```{r}
+show_best(xg_tune_res, metric = "rmse")
+```
+
+# Finalize Model Workflow
+
+Let's select the best and use it to finalize our model.
+
+## Select Best Parameter
+
+```{r}
+best_rmse <- select_best(xg_tune_res, "rmse")
+best_rmse
+```
+
+Now we can finalize the model
+
+```{r}
+final_boost_tree <- finalize_workflow(
+  xg_wf,
+  best_rmse
+)
+
+final_boost_tree
+```
+
+## Variable Importance
+
+Let's see the most important variables in the model.
+
+```{r}
+#| label: variable-importance
+library(vip)
+
+final_boost_tree |> 
+  fit(data = real_estate_train) |> 
+  pull_workflow_fit() |> 
+  vip(
+    geom = "col",
+    aesthetics = list(fill = "springgreen3")
+  ) +
+  theme_pander()
+```
+
+The most important predictor of the price of a house are the:
+
+-   Size
+-   Distance to the station,
+-   The latitude of the buildings, and
+-   The number of convenience stores.
+
+# Model Test
+
+Let's test how good the model is with the test data.
+
+```{r}
+final_result <- last_fit(final_boost_tree, real_estate_split)
+
+collect_metrics(final_result)
+```
+
+That's a high Rsquared, close to 1, and the RMSE have a very low error of ± 225.4 dollars. Let's plot prediction vs actual values
+
+```{r}
+final_result |> 
+  collect_predictions() |> 
+  select("actual" = price_usd, "prediction" = .pred) |> 
+  ggplot(aes(actual, prediction)) +
+  geom_point(col = "orange2") +
+  geom_label(
+    aes(x = 10500, y = 15000, label = "R-square: 0.9974"),
+    col = "blue"
+  ) +
+  geom_abline(col = "red") +
+  theme_few()
+```
+
+The plot shows a good performance of the model. For future prediction on a similar data in the region we extract the model and save it for later use.
+
+```{r}
+real_estate_boost_tree_model <- final_result |> 
+  extract_fit_parsnip()
+```
+
+\# Conclusion
+
+This project shows the capabilities of R, and the XGBoost algorithm in real estate use. While the model was built to predict price, it could be made better if a time component is give. Given the data used for this project, a time component is ill-advised as seasonality, and other time related components will not be properly studied by the algorithm.
+
+[Back to homepage](https://olamideadu.com)
